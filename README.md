@@ -1,6 +1,6 @@
 # LEGO Power
 
-[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://github.com/hacs/integration)
+[![hacs_badge](https://img.shields.io/badge/HACS-Default-41BDF5.svg)](https://github.com/hacs/integration)
 [![Validate](https://github.com/ajachierno/Lego-Power/actions/workflows/validate.yml/badge.svg)](https://github.com/ajachierno/Lego-Power/actions/workflows/validate.yml)
 
 A Home Assistant integration that controls **LEGO® Powered Up** motors directly
@@ -48,7 +48,7 @@ this integration is needed.
 
 ## Requirements
 
-- Home Assistant **2024.12.0** or newer.
+- Home Assistant **2026.3.0** or newer.
 - The [Bluetooth integration](https://www.home-assistant.io/integrations/bluetooth/)
   configured (a local adapter or an ESPHome Bluetooth proxy in range of the hub).
 
@@ -56,9 +56,8 @@ this integration is needed.
 
 ### HACS (recommended)
 
-1. In HACS, open the three‑dot menu → **Custom repositories**.
-2. Add `https://github.com/ajachierno/Lego-Power` with category **Integration**.
-3. Search for **LEGO Power**, install it, and restart Home Assistant.
+1. In HACS, search for **LEGO Power**.
+2. Open it, select **Download**, and restart Home Assistant.
 
 ### Manual
 
@@ -112,39 +111,6 @@ replace those actions with the motor switch, e.g.:
   target:
     entity_id: switch.piano_motor
 ```
-
-## Submitting to HACS
-
-The repo is structured for the
-[HACS integration requirements](https://www.hacs.xyz/docs/publish/integration/):
-`custom_components/lego_power/` with a `manifest.json` (incl. `version`,
-`documentation`, `issue_tracker`, `codeowners`) and a config flow, a root
-`hacs.json`, a README, and a `Validate` workflow running **hassfest** + the
-**HACS action**.
-
-To get listed in the **default HACS store**, in order:
-
-1. **Repo settings** (GitHub → repo home): add a **Description**, add **Topics**
-   (e.g. `home-assistant`, `hacs`, `homeassistant-integration`, `lego`,
-   `bluetooth`, `esphome`), and make sure **Issues** are enabled and the repo is
-   **public** and not archived.
-2. **Publish a Release**: GitHub → Releases → *Draft a new release* → choose the
-   latest tag → publish. HACS installs from the latest release.
-3. **Brand assets in Home Assistant** — the brand images are already shipped
-   in-repo at `custom_components/lego_power/brand/`, which satisfies the HACS
-   validation check. To also make the icon/logo **display in the Home Assistant
-   UI**, open a PR to
-   [home-assistant/brands](https://github.com/home-assistant/brands) adding
-   `custom_integrations/lego_power/{icon.png, icon@2x.png, logo.png, logo@2x.png}`
-   (copy them from this repo's `custom_components/lego_power/brand/` folder).
-   Recommended for the default store.
-4. **Check CI**: confirm the **Validate** workflow (Actions tab) is green
-   (hassfest + HACS). The brand check now passes from the in-repo assets.
-5. **Default-store PR**: fork [hacs/default](https://github.com/hacs/default),
-   add `ajachierno/Lego-Power` to the `integration` list (alphabetical), and open
-   a PR. A maintainer/bot reviews it.
-
-Custom-repository installs work today without any of the above.
 
 ## License
 
