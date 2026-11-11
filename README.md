@@ -22,23 +22,31 @@ supports **multiple hubs**, each added as its own device.
 
 ## Features
 
-- 🎛️ **Motor switch** — turn on to run the motor, off to stop it.
-- 🔌 **Connection switch** — connect or disconnect the hub from Home Assistant.
-- 🏎️ **Speed control** — a live slider (1–100%); defaults to a gear-safe 50%.
-- 📶 **Connected** binary sensor — shows the live Bluetooth connection status.
+- 🔍 **Port discovery** — the hub reports what is plugged into each port, and
+  the right controls appear automatically: motor controls for a motor, a
+  dimmable light for an 88005 Light. Plug in or swap devices while connected
+  and the entities follow.
+- 🎛️ **Per-port motor controls** — run/stop switch, live speed slider
+  (1–100 %, defaults to a gear‑safe 50 %), reverse and brake toggles.
+- 💡 **Lights** — the 88005 Light is a real `light` entity with brightness.
+- 🔋 **Battery** level and a **Port X device** diagnostic sensor per port.
+- 🔌 **Connection** switch and **Connected** binary sensor.
 - ➕ **Multiple devices** — add as many hubs as you like, one config entry each.
 - 🔁 **Auto‑reconnect** — re‑establishes the link when the hub comes back in range.
-- 🎚️ **Live device controls** — motor port, direction (Reverse toggle) and
-  stop behaviour (Brake toggle) are adjustable right on the device page, no
-  reconfigure dialog needed.
 
 ## How it works
 
 LEGO Powered Up hubs (City Hub 88009, Technic Hub 88012, Boost Move Hub 88006,
 etc.) expose a single BLE service (`00001623-…`) with one characteristic
 (`00001624-…`). This integration sends *Port Output Commands*
-(`WriteDirectModeData`, direct power mode) to start and stop the motor on the
-configured port.
+(`WriteDirectModeData`, direct mode) to drive the motor or light on each port.
+
+On connect the integration subscribes to the hub's notifications. The hub then
+sends a *Hub Attached I/O* message for every device on its ports (and again
+whenever one is plugged in or removed); each one carries an IO type ID, which
+decides which entities are created for that port. Lights are driven with the
+same direct-mode command as motors, where the value is brightness instead of
+power.
 
 Home Assistant's Bluetooth stack provides the radio. If your Home Assistant host
 has no Bluetooth, or the hub is out of range, an
@@ -76,17 +84,29 @@ LEGO Power**, pick the hub, then set:
 | --- | --- |
 | **Name** | Friendly name for the device (e.g. `Piano`). |
 
-That's the only setup question. Everything else is a **live control on the device page** (and remembers its value across restarts):
+That's the only setup question. Entities are created per port (A, B, C, D)
+based on what the hub reports, and settings remember their value across
+restarts:
 
-| Entity | What it does |
-| --- | --- |
-| **Motor** (switch) | Run / stop the motor. |
-| **Speed** (number) | Run speed, 1–100 %. Defaults to a gear‑safe **50 %**. |
-| **Reverse** (switch) | Off = forward, on = reverse direction. |
-| **Brake on stop** (switch) | Off = float/coast, on = brake/hold when stopped. |
-| **Motor port** (number) | Hub port the motor is on (**A=0, B=1, C=2, D=3**). |
-| **Connection** (switch) | Connect / disconnect the hub. |
-| **Connected** (binary sensor) | Live Bluetooth connection status. |
+| Entity | Created when | What it does |
+| --- | --- | --- |
+| **Port X motor** (switch) | a motor is on port X | Run / stop the motor. |
+| **Port X speed** (number) | a motor is on port X | Run speed, 1–100 %. Defaults to a gear‑safe **50 %**. |
+| **Port X reverse** (switch) | a motor is on port X | Off = forward, on = reverse direction. |
+| **Port X brake on stop** (switch) | a motor is on port X | Off = float/coast, on = brake/hold when stopped. |
+| **Port X light** (light) | an 88005 Light is on port X | On / off with brightness. |
+| **Port X device** (sensor) | anything is on port X | What the hub reports on that port, with the raw `io_type`. |
+| **Battery** (sensor) | always | Hub battery level. |
+| **Connection** (switch) | always | Connect / disconnect the hub. |
+| **Connected** (binary sensor) | always | Live Bluetooth connection status. |
+
+Entities for a port stay registered when its device is unplugged and show as
+unavailable until it is plugged back in.
+
+Supported devices: Powered Up / Technic motors (88008, 88011 train motor,
+88013, 88014, Technic angular motors, Boost motors) and the 88005 Light. Any
+other device still shows up in its **Port X device** sensor, so its IO type can
+be added later.
 
 > [!CAUTION]
 > Full speed (100 %) will skip the LEGO Piano (21323) gears. Keep the Speed at or near the default 50 % for that set.
@@ -95,21 +115,20 @@ That's the only setup question. Everything else is a **live control on the devic
 > were previously controlling the hub from custom ESPHome firmware, disable that
 > connection first so this integration can connect.
 
-## Replacing the old play/stop automations
+## Upgrading from 1.x
 
-If you came here from automations that pressed `button.*_play` / `button.*_stop`,
-replace those actions with the motor switch, e.g.:
+1.x exposed a single **Motor** switch with a configurable **Motor port**. In
+2.0 those entities (Motor, Speed, Reverse, Brake on stop, Motor port) are
+removed and replaced by per-port entities. Update automations accordingly, e.g.
+`switch.piano_motor` → `switch.piano_port_a_motor`. Direction now defaults to
+forward; turn on **Port A reverse** once if your set needs reverse (the LEGO
+Piano does).
 
-```yaml
-# Old
-- action: button.press
-  target:
-    entity_id: button.lego_piano_controller_play
+## Development
 
-# New
-- action: switch.turn_on
-  target:
-    entity_id: switch.piano_motor
+```bash
+pip install pytest-homeassistant-custom-component
+pytest tests --asyncio-mode=auto
 ```
 
 ## License

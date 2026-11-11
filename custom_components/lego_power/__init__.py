@@ -14,24 +14,23 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import entity_registry as er
 
-from .const import (
-    DEFAULT_DIRECTION,
-    DEFAULT_PORT,
-    DEFAULT_SPEED,
-    DEFAULT_STOP_ACTION,
-    DIRECTION_REVERSE,
-    STOP_BRAKE,
-)
 from .hub import LegoPowerConnectionError, LegoPowerHub
 
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
+    Platform.LIGHT,
     Platform.NUMBER,
+    Platform.SENSOR,
     Platform.SWITCH,
 ]
+
+# Unique ID suffixes of the single-motor entities from version 1.x, replaced
+# by per-port entities discovered from the hub.
+_LEGACY_SUFFIXES = ("motor", "speed", "port", "reverse", "brake")
 
 type LegoPowerConfigEntry = ConfigEntry[LegoPowerHub]
 
@@ -41,19 +40,7 @@ async def async_setup_entry(
 ) -> bool:
     """Set up LEGO Power from a config entry."""
     address: str = entry.data[CONF_ADDRESS]
-
-    # Motor port, speed, direction and stop behaviour are now controlled by
-    # live entities on the device page (which restore their own state), so the
-    # hub only needs sensible starting defaults here.
-    hub = LegoPowerHub(
-        hass,
-        address=address,
-        name=entry.title,
-        port=DEFAULT_PORT,
-        speed=DEFAULT_SPEED,
-        reverse=DEFAULT_DIRECTION == DIRECTION_REVERSE,
-        brake_on_stop=DEFAULT_STOP_ACTION == STOP_BRAKE,
-    )
+    hub = LegoPowerHub(hass, address=address, name=entry.title)
 
     if not bluetooth.async_address_present(hass, address, connectable=True):
         raise ConfigEntryNotReady(
@@ -97,3 +84,23 @@ async def async_unload_entry(
     if unload_ok:
         await entry.runtime_data.async_disconnect()
     return unload_ok
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate an old config entry."""
+    if entry.version > 2:
+        return False
+
+    if entry.version == 1:
+        # 1.x exposed one motor with a configurable port. Ports are now
+        # discovered, so drop the old single-motor entities.
+        registry = er.async_get(hass)
+        address = entry.data[CONF_ADDRESS]
+        legacy = {f"{address}_{suffix}" for suffix in _LEGACY_SUFFIXES}
+        for reg_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
+            if reg_entry.unique_id in legacy:
+                _LOGGER.info("Removing legacy entity %s", reg_entry.entity_id)
+                registry.async_remove(reg_entry.entity_id)
+        hass.config_entries.async_update_entry(entry, version=2)
+
+    return True

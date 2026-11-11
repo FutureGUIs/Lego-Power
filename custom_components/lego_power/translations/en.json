@@ -11,7 +11,7 @@
       },
       "name": {
         "title": "Name your LEGO hub",
-        "description": "Give {name} a name. Motor port, speed, direction and stop behaviour are adjustable afterwards as controls on the device page.",
+        "description": "Give {name} a name. Devices plugged into the hub's ports are discovered automatically, and each gets its own controls on the device page.",
         "data": {
           "name": "Name"
         }
@@ -25,24 +25,31 @@
   "entity": {
     "switch": {
       "motor": {
-        "name": "Motor"
+        "name": "Port {port} motor"
       },
       "connection": {
         "name": "Connection"
       },
       "reverse": {
-        "name": "Reverse"
+        "name": "Port {port} reverse"
       },
       "brake": {
-        "name": "Brake on stop"
+        "name": "Port {port} brake on stop"
       }
     },
     "number": {
       "speed": {
-        "name": "Speed"
-      },
-      "port": {
-        "name": "Motor port"
+        "name": "Port {port} speed"
+      }
+    },
+    "light": {
+      "light": {
+        "name": "Port {port} light"
+      }
+    },
+    "sensor": {
+      "port_device": {
+        "name": "Port {port} device"
       }
     },
     "binary_sensor": {

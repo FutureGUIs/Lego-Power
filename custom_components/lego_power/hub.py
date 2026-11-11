@@ -3,73 +3,150 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 import logging
+from collections.abc import Callable
 
 from bleak.exc import BleakError
 from bleak_retry_connector import (
     BleakClientWithServiceCache,
     establish_connection,
 )
-
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
 
 from . import lego
-from .const import LEGO_HUB_CHARACTERISTIC_UUID, MAX_SPEED, MIN_SPEED
+from .const import (
+    DEFAULT_LIGHT_BRIGHTNESS,
+    DEFAULT_SPEED,
+    LEGO_HUB_CHARACTERISTIC_UUID,
+    MAX_SPEED,
+    MIN_SPEED,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 # How many times bleak-retry-connector retries a single connection attempt.
 _CONNECT_ATTEMPTS = 3
 
+PortListener = Callable[[int, int], None]
+
 
 class LegoPowerConnectionError(Exception):
     """Raised when the hub cannot be reached over Bluetooth."""
 
 
-class LegoPowerHub:
-    """Manage the BLE link to one LEGO hub and drive a single motor."""
+class PortOutput:
+    """State for one controllable output (a motor or a light) on one port."""
 
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        address: str,
-        name: str,
-        port: int,
-        speed: int,
-        reverse: bool,
-        brake_on_stop: bool,
-    ) -> None:
-        """Initialise the hub controller."""
-        self.hass = hass
-        self.address = address
-        self.name = name
+    def __init__(self, hub: LegoPowerHub, port: int, kind: str) -> None:
+        """Initialise the output with default settings."""
+        self.hub = hub
         self.port = port
-        self.reverse = reverse
-        self.brake_on_stop = brake_on_stop
-        self._speed = self._clamp_speed(speed)
-
-        self._client: BleakClientWithServiceCache | None = None
-        self._lock = asyncio.Lock()
-        self._running = False
-        self._should_stay_connected = False
-        self._callbacks: set[Callable[[], None]] = set()
-
-    @staticmethod
-    def _clamp_speed(value: int) -> int:
-        """Clamp a speed percentage to the supported range."""
-        return max(MIN_SPEED, min(MAX_SPEED, int(value)))
-
-    @property
-    def speed(self) -> int:
-        """Return the configured run speed as a percentage (1-100)."""
-        return self._speed
+        self.kind = kind
+        self.label = lego.port_label(port)
+        # Shared "on" flag: motor running / light lit.
+        self.on = False
+        # Motor settings.
+        self.speed = DEFAULT_SPEED
+        self.reverse = False
+        self.brake_on_stop = False
+        # Light settings.
+        self.brightness = DEFAULT_LIGHT_BRIGHTNESS
 
     @property
     def signed_power(self) -> int:
         """Return the motor power (-100..100) including direction."""
-        return -self._speed if self.reverse else self._speed
+        return -self.speed if self.reverse else self.speed
+
+    @property
+    def is_on(self) -> bool:
+        """Return True when the output is running/lit on a live link."""
+        return self.on and self.hub.connected
+
+    @property
+    def available(self) -> bool:
+        """Return True when this output can be driven.
+
+        While disconnected the output stays available so turning it on can
+        reconnect the hub. Once connected, it is only available when the hub
+        reports a device of the matching kind on this port.
+        """
+        if not self.hub.connected:
+            return True
+        return self.hub.port_kind(self.port) == self.kind
+
+    def command(self) -> bytes:
+        """Return the message that applies the current state to the hub."""
+        if self.kind == lego.KIND_LIGHT:
+            return lego.set_light_brightness(
+                self.port, self.brightness if self.on else 0
+            )
+        if self.on:
+            return lego.set_motor_power(self.port, self.signed_power)
+        return lego.stop_motor(self.port, brake=self.brake_on_stop)
+
+    def off_command(self) -> bytes:
+        """Return the message that switches this output off."""
+        if self.kind == lego.KIND_LIGHT:
+            return lego.set_light_brightness(self.port, 0)
+        return lego.stop_motor(self.port, brake=self.brake_on_stop)
+
+    async def async_set_on(self, on: bool) -> None:
+        """Run/stop the motor or switch the light on/off."""
+        if on and not self.hub.connected:
+            await self.hub.async_connect()
+        self.on = on
+        if self.hub.connected:
+            await self.hub.async_write(self.command())
+        self.hub.notify()
+
+    async def async_set_speed(self, speed: int) -> None:
+        """Set the motor speed, applying it live if running."""
+        self.speed = max(MIN_SPEED, min(MAX_SPEED, int(speed)))
+        await self._async_reapply()
+
+    async def async_set_reverse(self, reverse: bool) -> None:
+        """Set the motor direction, applying it live if running."""
+        self.reverse = bool(reverse)
+        await self._async_reapply()
+
+    async def async_set_brake_on_stop(self, brake: bool) -> None:
+        """Set the stop behaviour (applies on the next stop)."""
+        self.brake_on_stop = bool(brake)
+        self.hub.notify()
+
+    async def async_set_brightness(self, brightness: int) -> None:
+        """Set the light brightness (1..100) and switch it on."""
+        self.brightness = max(1, min(100, int(brightness)))
+        await self.async_set_on(True)
+
+    async def _async_reapply(self) -> None:
+        if self.is_on:
+            await self.hub.async_write(self.command())
+        self.hub.notify()
+
+
+class LegoPowerHub:
+    """Manage the BLE link to one LEGO hub and the devices on its ports."""
+
+    def __init__(self, hass: HomeAssistant, address: str, name: str) -> None:
+        """Initialise the hub controller."""
+        self.hass = hass
+        self.address = address
+        self.name = name
+
+        # Port ID -> IO type ID, as reported by Hub Attached I/O messages.
+        self.ports: dict[int, int] = {}
+        self.battery: int | None = None
+        self._outputs: dict[tuple[int, str], PortOutput] = {}
+
+        self._client: BleakClientWithServiceCache | None = None
+        self._lock = asyncio.Lock()
+        self._should_stay_connected = False
+        self._callbacks: set[Callable[[], None]] = set()
+        self._port_listeners: set[PortListener] = set()
+
+    # -- state ------------------------------------------------------------
 
     @property
     def connected(self) -> bool:
@@ -77,77 +154,40 @@ class LegoPowerHub:
         return self._client is not None and self._client.is_connected
 
     @property
-    def is_running(self) -> bool:
-        """Return True when the motor has been commanded to run."""
-        return self._running and self.connected
-
-    @property
     def should_stay_connected(self) -> bool:
         """Return True when the hub is meant to maintain a connection."""
         return self._should_stay_connected
 
+    def port_kind(self, port: int) -> str | None:
+        """Return the output kind of the device currently on ``port``."""
+        io_type = self.ports.get(port)
+        return None if io_type is None else lego.io_type_kind(io_type)
+
+    def get_output(self, port: int, kind: str) -> PortOutput:
+        """Return (creating if needed) the output state for ``port``/``kind``."""
+        key = (port, kind)
+        if key not in self._outputs:
+            self._outputs[key] = PortOutput(self, port, kind)
+        return self._outputs[key]
+
+    # -- listeners --------------------------------------------------------
+
     def register_callback(self, callback: Callable[[], None]) -> Callable[[], None]:
         """Register a listener to be notified of state changes."""
         self._callbacks.add(callback)
+        return lambda: self._callbacks.discard(callback)
 
-        def _remove() -> None:
-            self._callbacks.discard(callback)
+    def register_port_listener(self, listener: PortListener) -> Callable[[], None]:
+        """Register a listener called with (port, io_type) on device attach."""
+        self._port_listeners.add(listener)
+        return lambda: self._port_listeners.discard(listener)
 
-        return _remove
-
-    def _notify(self) -> None:
+    def notify(self) -> None:
         """Notify all registered listeners that state changed."""
         for callback in list(self._callbacks):
             callback()
 
-    def set_speed_value(self, speed: int) -> None:
-        """Set the run speed without sending anything to the hub."""
-        self._speed = self._clamp_speed(speed)
-
-    async def async_set_speed(self, speed: int) -> None:
-        """Set the run speed, applying it live if the motor is running."""
-        self._speed = self._clamp_speed(speed)
-        if self.is_running:
-            await self._write(lego.set_motor_power(self.port, self.signed_power))
-        self._notify()
-
-    def set_reverse_value(self, reverse: bool) -> None:
-        """Set the direction without sending anything to the hub."""
-        self.reverse = bool(reverse)
-
-    async def async_set_reverse(self, reverse: bool) -> None:
-        """Set the direction, re-applying live if the motor is running."""
-        self.reverse = bool(reverse)
-        if self.is_running:
-            await self._write(lego.set_motor_power(self.port, self.signed_power))
-        self._notify()
-
-    def set_brake_on_stop_value(self, brake: bool) -> None:
-        """Set the stop behaviour without sending anything to the hub."""
-        self.brake_on_stop = bool(brake)
-
-    async def async_set_brake_on_stop(self, brake: bool) -> None:
-        """Set the stop behaviour (applies on the next stop)."""
-        self.brake_on_stop = bool(brake)
-        self._notify()
-
-    def set_port_value(self, port: int) -> None:
-        """Set the motor port without sending anything to the hub."""
-        self.port = int(port)
-
-    async def async_set_port(self, port: int) -> None:
-        """Change the motor port, safely handling a running motor."""
-        new_port = int(port)
-        if new_port == self.port:
-            return
-        was_running = self.is_running
-        if was_running:
-            # Stop the old port first so it does not keep spinning.
-            await self._write(lego.stop_motor(self.port, brake=self.brake_on_stop))
-        self.port = new_port
-        if was_running:
-            await self._write(lego.set_motor_power(self.port, self.signed_power))
-        self._notify()
+    # -- connection -------------------------------------------------------
 
     async def async_connect(self) -> None:
         """Establish the BLE connection to the hub."""
@@ -179,20 +219,28 @@ class LegoPowerHub:
 
             self._client = client
             self._should_stay_connected = True
+            self.ports.clear()
 
             try:
+                # Subscribing makes the hub announce every attached device.
                 await client.start_notify(
                     LEGO_HUB_CHARACTERISTIC_UUID, self._handle_notification
                 )
+                await client.write_gatt_char(
+                    LEGO_HUB_CHARACTERISTIC_UUID,
+                    lego.enable_battery_updates(),
+                    response=False,
+                )
             except (BleakError, asyncio.TimeoutError):
-                _LOGGER.debug(
-                    "Could not subscribe to notifications on %s",
+                _LOGGER.warning(
+                    "Could not subscribe to notifications on %s; "
+                    "attached devices will not be discovered",
                     self.address,
                     exc_info=True,
                 )
 
         _LOGGER.debug("Connected to LEGO hub %s (%s)", self.name, self.address)
-        self._notify()
+        self.notify()
 
     async def async_connect_safe(self) -> None:
         """Attempt to connect, swallowing connection errors."""
@@ -202,43 +250,35 @@ class LegoPowerHub:
             _LOGGER.debug("Connect attempt for %s failed: %s", self.address, err)
 
     async def async_disconnect(self) -> None:
-        """Stop the motor and disconnect, and stay disconnected."""
+        """Switch every output off and disconnect, and stay disconnected."""
         self._should_stay_connected = False
         async with self._lock:
             client = self._client
             self._client = None
-            self._running = False
             if client is not None and client.is_connected:
-                try:
-                    await client.write_gatt_char(
-                        LEGO_HUB_CHARACTERISTIC_UUID,
-                        lego.stop_motor(self.port, brake=self.brake_on_stop),
-                        response=False,
-                    )
-                except (BleakError, asyncio.TimeoutError):
-                    _LOGGER.debug("Error stopping motor on disconnect", exc_info=True)
+                for output in self._outputs.values():
+                    if not output.on:
+                        continue
+                    try:
+                        await client.write_gatt_char(
+                            LEGO_HUB_CHARACTERISTIC_UUID,
+                            output.off_command(),
+                            response=False,
+                        )
+                    except (BleakError, asyncio.TimeoutError):
+                        _LOGGER.debug(
+                            "Error stopping port %s on disconnect",
+                            output.label,
+                            exc_info=True,
+                        )
                 try:
                     await client.disconnect()
                 except (BleakError, asyncio.TimeoutError):
                     _LOGGER.debug("Error during disconnect", exc_info=True)
-        self._notify()
+            self._reset_link_state()
+        self.notify()
 
-    async def async_set_running(self, running: bool) -> None:
-        """Start or stop the motor."""
-        if running:
-            if not self.connected:
-                await self.async_connect()
-            await self._write(lego.set_motor_power(self.port, self.signed_power))
-            self._running = True
-        else:
-            if self.connected:
-                await self._write(
-                    lego.stop_motor(self.port, brake=self.brake_on_stop)
-                )
-            self._running = False
-        self._notify()
-
-    async def _write(self, data: bytes) -> None:
+    async def async_write(self, data: bytes) -> None:
         """Write a raw command to the hub characteristic."""
         client = self._client
         if client is None or not client.is_connected:
@@ -252,19 +292,44 @@ class LegoPowerHub:
                 f"Failed to send command to {self.address}: {err}"
             ) from err
 
+    def _reset_link_state(self) -> None:
+        """Forget everything that only holds while connected."""
+        self.ports.clear()
+        for output in self._outputs.values():
+            output.on = False
+
     def _handle_disconnect(self, _client: BleakClientWithServiceCache) -> None:
         """Handle an unexpected disconnect from the hub."""
         _LOGGER.debug("LEGO hub %s disconnected", self.address)
         self._client = None
-        self._running = False
-        self._notify()
+        self._reset_link_state()
+        self.notify()
         if self._should_stay_connected:
             self.hass.async_create_task(self.async_connect_safe())
 
-    def _handle_notification(self, _sender: int, data: bytearray) -> None:
-        """Handle inbound notifications from the hub.
-
-        Notifications are currently only used to keep the link active; the
-        payloads (port info, hub alerts, etc.) are not yet interpreted.
-        """
+    def _handle_notification(self, _sender: object, data: bytearray) -> None:
+        """Handle inbound notifications from the hub."""
         _LOGGER.debug("Notification from %s: %s", self.address, data.hex())
+        message = lego.parse_message(data)
+
+        if isinstance(message, lego.AttachedIO):
+            if message.io_type is None:
+                _LOGGER.debug("Port %s: device detached", message.port)
+                self.ports.pop(message.port, None)
+                output_kinds = [k for (p, k) in self._outputs if p == message.port]
+                for kind in output_kinds:
+                    self._outputs[(message.port, kind)].on = False
+            else:
+                _LOGGER.debug(
+                    "Port %s: %s attached",
+                    lego.port_label(message.port),
+                    lego.io_type_name(message.io_type),
+                )
+                self.ports[message.port] = message.io_type
+                for listener in list(self._port_listeners):
+                    listener(message.port, message.io_type)
+            self.notify()
+
+        elif isinstance(message, lego.BatteryLevel):
+            self.battery = message.percent
+            self.notify()
