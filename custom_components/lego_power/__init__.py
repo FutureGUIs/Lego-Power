@@ -13,10 +13,9 @@ from homeassistant.components.bluetooth import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import entity_registry as er
 
-from .hub import LegoPowerConnectionError, LegoPowerHub
+from .hub import LegoPowerHub
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,17 +41,14 @@ async def async_setup_entry(
     address: str = entry.data[CONF_ADDRESS]
     hub = LegoPowerHub(hass, address=address, name=entry.title)
 
-    if not bluetooth.async_address_present(hass, address, connectable=True):
-        raise ConfigEntryNotReady(
-            f"LEGO hub {address} is not currently in Bluetooth range"
-        )
-
-    try:
-        await hub.async_connect()
-    except LegoPowerConnectionError as err:
-        raise ConfigEntryNotReady(str(err)) from err
-
     entry.runtime_data = hub
+
+    # Connect in the background. If the hub is off or out of range the entry
+    # still loads; its entities are unavailable until the hub advertises and
+    # the callback below connects to it.
+    entry.async_create_background_task(
+        hass, hub.async_connect_safe(), f"lego_power connect {address}"
+    )
 
     @callback
     def _async_on_advertisement(
@@ -60,7 +56,7 @@ async def async_setup_entry(
         _change: BluetoothChange,
     ) -> None:
         """Reconnect automatically when the hub starts advertising again."""
-        if hub.should_stay_connected and not hub.connected:
+        if hub.should_stay_connected and not hub.connected and not hub.connecting:
             hass.async_create_task(hub.async_connect_safe())
 
     entry.async_on_unload(

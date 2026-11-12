@@ -13,6 +13,7 @@ from bleak_retry_connector import (
 )
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 
 from . import lego
 from .const import (
@@ -31,7 +32,7 @@ _CONNECT_ATTEMPTS = 3
 PortListener = Callable[[int, int], None]
 
 
-class LegoPowerConnectionError(Exception):
+class LegoPowerConnectionError(HomeAssistantError):
     """Raised when the hub cannot be reached over Bluetooth."""
 
 
@@ -65,15 +66,12 @@ class PortOutput:
 
     @property
     def available(self) -> bool:
-        """Return True when this output can be driven.
+        """Return True when the hub is connected with a matching device here.
 
-        While disconnected the output stays available so turning it on can
-        reconnect the hub. Once connected, it is only available when the hub
-        reports a device of the matching kind on this port.
+        While the hub is off or out of range the output is unavailable; the
+        integration reconnects on its own as soon as the hub advertises again.
         """
-        if not self.hub.connected:
-            return True
-        return self.hub.port_kind(self.port) == self.kind
+        return self.hub.connected and self.hub.port_kind(self.port) == self.kind
 
     def command(self) -> bytes:
         """Return the message that applies the current state to the hub."""
@@ -152,6 +150,11 @@ class LegoPowerHub:
     def connected(self) -> bool:
         """Return True when an active BLE connection exists."""
         return self._client is not None and self._client.is_connected
+
+    @property
+    def connecting(self) -> bool:
+        """Return True while a connection attempt is in progress."""
+        return self._lock.locked()
 
     @property
     def should_stay_connected(self) -> bool:
@@ -243,7 +246,12 @@ class LegoPowerHub:
         self.notify()
 
     async def async_connect_safe(self) -> None:
-        """Attempt to connect, swallowing connection errors."""
+        """Attempt to connect, swallowing connection errors.
+
+        Marks the hub as wanted, so a failed attempt is retried automatically
+        when the hub next advertises (e.g. once it is switched on).
+        """
+        self._should_stay_connected = True
         try:
             await self.async_connect()
         except LegoPowerConnectionError as err:

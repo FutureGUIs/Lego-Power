@@ -103,6 +103,10 @@ restarts:
 Entities for a port stay registered when its device is unplugged and show as
 unavailable until it is plugged back in.
 
+The hub doesn't need to be on when Home Assistant starts. The integration
+loads anyway, its controls and sensors show as unavailable, and it connects
+by itself as soon as the hub is switched on and advertises.
+
 Supported devices: Powered Up / Technic motors (88008, 88011 train motor,
 88013, 88014, Technic angular motors, Boost motors) and the 88005 Light. Any
 other device still shows up in its **Port X device** sensor, so its IO type can

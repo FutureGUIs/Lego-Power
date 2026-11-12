@@ -29,7 +29,7 @@ async def _setup(hass: HomeAssistant, version: int = 2) -> MockConfigEntry:
     )
     entry.add_to_hass(hass)
     await hass.config_entries.async_setup(entry.entry_id)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     return entry
 
 
@@ -88,17 +88,17 @@ async def test_hot_plug_and_unplug(hass: HomeAssistant, fake_client) -> None:
     assert hass.states.get("light.city_hub_port_b_light") is None
 
     fake_client.push(LIGHT_ON_B)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert hass.states.get("light.city_hub_port_b_light").state == "off"
 
     fake_client.push(bytes.fromhex("0500040100"))  # port B detached
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert hass.states.get("light.city_hub_port_b_light").state == "unavailable"
     assert hass.states.get("sensor.city_hub_port_b_device").state == "Nothing attached"
 
     # Swap a train motor into port B: motor controls appear for B.
     fake_client.push(bytes.fromhex("0f0004010102000000001000000010"))
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert hass.states.get("switch.city_hub_port_b_motor").state == "off"
     assert hass.states.get("sensor.city_hub_port_b_device").state == "Train motor"
 
@@ -116,7 +116,7 @@ async def test_entities_restored_after_restart(hass: HomeAssistant, fake_client)
         suggested_object_id="city_hub_port_b_light",
     )
     await hass.config_entries.async_setup(entry.entry_id)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert hass.states.get("light.city_hub_port_b_light").state == "unavailable"
 
 
@@ -132,7 +132,51 @@ async def test_migration_removes_legacy_entities(hass: HomeAssistant, fake_clien
             "switch", DOMAIN, f"{ADDRESS}_{suffix}", config_entry=entry
         )
     await hass.config_entries.async_setup(entry.entry_id)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert entry.version == 2
     assert registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_motor") is None
     assert registry.async_get_entity_id("switch", DOMAIN, f"{ADDRESS}_connection")
+
+
+async def test_loads_when_hub_is_off(hass: HomeAssistant, fake_client) -> None:
+    """The entry loads with the hub off; entities come alive once it is on."""
+    from unittest.mock import MagicMock, patch
+
+    registry = er.async_get(hass)
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="City Hub", data={CONF_ADDRESS: ADDRESS},
+        unique_id=ADDRESS, version=2,
+    )
+    entry.add_to_hass(hass)
+    registry.async_get_or_create(
+        "light", DOMAIN, f"{ADDRESS}_p1_light_light", config_entry=entry,
+        suggested_object_id="city_hub_port_b_light",
+    )
+    fake_client.on_subscribe = [MOTOR_ON_A, LIGHT_ON_B, BATTERY]
+
+    with patch(
+        "custom_components.lego_power.hub.bluetooth.async_ble_device_from_address",
+        return_value=None,
+    ):
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert entry.state is ConfigEntryState.LOADED
+    assert hass.states.get("binary_sensor.city_hub_connected").state == "off"
+    assert hass.states.get("light.city_hub_port_b_light").state == "unavailable"
+    assert hass.states.get("sensor.city_hub_battery").state == "unavailable"
+
+    # The hub is switched on and advertises: the integration connects itself.
+    hub = entry.runtime_data
+    assert hub.should_stay_connected
+    with patch(
+        "custom_components.lego_power.hub.bluetooth.async_ble_device_from_address",
+        return_value=MagicMock(),
+    ):
+        await hub.async_connect_safe()
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert hass.states.get("binary_sensor.city_hub_connected").state == "on"
+    assert hass.states.get("light.city_hub_port_b_light").state == "off"
+    assert hass.states.get("switch.city_hub_port_a_motor").state == "off"
+    assert hass.states.get("sensor.city_hub_battery").state == "87"
